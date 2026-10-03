@@ -1,8 +1,24 @@
-# OpenBullet Cookie Edition
+# OpenBullet Cookie Edition — Authorized Authentication Testing Framework
 
-A modified fork of **OpenBullet** — a web testing suite with modular architecture built on **.NET Framework 4.7.1 / WPF**.
+> **Scope**: This project is developed and maintained for **authorized penetration testing, QA automation, and authentication endpoint validation** on systems the operator owns or has explicit written permission to test. All usage must comply with applicable laws and service terms.
 
-This edition introduces **cookie-based authentication testing**, **TLS Client Impersonation** (via `tls-client` native library), **binary cookie parsing** (Netscape, JSON, SQLite formats), and several engine-level performance improvements.
+---
+
+## Overview
+
+OpenBullet Cookie Edition is a **WPF-based automation framework** for testing web application authentication endpoints, session handling, cookie lifecycle management, and API authentication flows. It is built on top of the original OpenBullet project and extended with:
+
+- **TLS Client Impersonation** — Browser-accurate TLS fingerprinting via `tls-client` (Go native library) for testing endpoints that perform fingerprint-based bot detection
+- **Binary Cookie Parsing** — Chromium SQLite, Netscape, and JSON cookie format support for session replay testing
+- **Modular Block Architecture** — Script-based automation blocks for building test flows: HTTP requests, response parsing, key-based status classification, conditional branching
+- **Concurrent Execution Engine** — Multi-threaded runner with configurable parallelism, retry policies, proxy routing, and safe timeout/abort lifecycle management
+
+**Primary use cases**:
+- Validating authentication session lifecycle (login, cookie expiry, forced logout)
+- Testing whether your service correctly detects and rejects replayed session cookies
+- Benchmarking login endpoint throughput and error handling under load
+- Validating TLS fingerprint-based bot detection from the client perspective
+- Reproducing specific browser TLS handshake profiles in automation
 
 ---
 
@@ -11,90 +27,165 @@ This edition introduces **cookie-based authentication testing**, **TLS Client Im
 ```
 OpenBullet.sln
 ├── RuriLib/                    # Core engine library
-│   ├── Blocks/                 # Modular block system (request, parse, keycheck, etc.)
-│   ├── Functions/              # Utility functions (crypto, encoding, parsing, HTTP)
-│   ├── LoliScript/             # Script engine (LoliScript DSL interpreter)
-│   ├── Models/                 # Data models (BotData, CData, CProxy, Cookie)
-│   ├── Runner/                 # Multi-threaded runner engine (RunnerViewModel)
-│   └── ViewModels/             # Settings and configuration view models
-├── OpenBullet/                 # WPF desktop application (UI)
+│   ├── Blocks/                 # Modular block system
+│   │   ├── BlockRequest.cs         Standard HTTP via HttpWebRequest / Extreme.Net
+│   │   ├── BlockTlsRequest.cs      TLS-impersonated HTTP (browser fingerprint)
+│   │   ├── BlockParse.cs           Response parsing (JSON, LR, CSS, Regex)
+│   │   ├── BlockKeycheck.cs        Status classification (pass/fail/retry/ban patterns)
+│   │   ├── BlockFunction.cs        String, crypto, encoding, GUID utilities
+│   │   ├── BlockCookieContainer.cs Cookie loading (Netscape / JSON / SQLite)
+│   │   ├── BlockBinaryCodec.cs     Binary data encode/decode
+│   │   └── BlockBypassCF.cs        Cloudflare challenge handling (Selenium)
+│   ├── Functions/              # Utility function modules
+│   │   ├── Requests/               HTTP client + TLS client wrappers
+│   │   │   └── TlsClient/          Native Go tls-client P/Invoke bindings
+│   │   ├── Crypto/                 Hashing and cryptographic utilities
+│   │   ├── Parsing/                HTML, JSON, regex parsing helpers
+│   │   └── Conditions/             Key matching / condition evaluation
+│   ├── LoliScript/             # Test script DSL engine
+│   │   ├── LoliScript.cs           Line-by-line interpreter
+│   │   ├── Parser/BlockParser.cs   Block instruction parser
+│   │   └── Parser/CommandParser.cs Flow control (IF/ELSE, JUMP, SET)
+│   ├── Models/                 # Core data models
+│   │   ├── BotData.cs              Per-worker execution context
+│   │   ├── Cookie.cs               Cookie model + multi-format parser
+│   │   └── CData.cs / CProxy.cs    Input data + proxy models
+│   ├── Runner/                 # Concurrent execution engine
+│   │   ├── RunnerViewModel.cs      Master runner (BackgroundWorker parallelism)
+│   │   └── RunnerBotViewModel.cs   Individual worker state machine
+│   └── ViewModels/             # Settings and configuration
+├── OpenBullet/                 # WPF desktop application
 │   ├── Views/                  # XAML views (Runner, Stacker, Settings, Tools)
-│   ├── ViewModels/             # UI-specific view models
+│   ├── ViewModels/             # UI state management
 │   └── Repositories/           # LiteDB data access layer
 ├── OpenBulletCLI/              # Command-line interface
-└── PluginFramework/            # Plugin system for extensibility
+└── PluginFramework/            # Plugin extensibility system
 ```
 
 ---
 
-## Key Components
+## Block System
 
-### Block System (`RuriLib/Blocks/`)
+Test scripts (LoliScript `.loli` files) are composed of blocks — each block performs one operation:
 
-The engine uses a modular **Block** architecture. Each block performs a specific operation and can be chained together in configs:
+| Block | Purpose |
+|-------|---------|
+| `TLSREQUEST` | Send HTTP request with specific TLS fingerprint (browser impersonation) |
+| `REQUEST` | Standard HTTP request |
+| `KEYCHECK` | Classify response outcome via pattern matching |
+| `PARSE` | Extract values from response (JSON path, LR, CSS, Regex) |
+| `FUNCTION` | Transform strings (Base64, HMAC, GUID, Replace, etc.) |
+| `COOKIECONTAINER` | Load browser cookie files (Chromium SQLite, Netscape, JSON) |
+| `BINARYCODEC` | Encode/decode binary protocol buffers or custom formats |
+| `BYPASSCF` | Obtain Cloudflare clearance via Selenium for subsequent requests |
 
-| Block | File | Purpose |
-|-------|------|---------|
-| `BlockRequest` | `BlockRequest.cs` | Standard HTTP requests via `HttpWebRequest` / Extreme.Net |
-| `BlockTlsRequest` | `BlockTlsRequest.cs` | TLS-impersonated HTTP requests via native `tls-client` library |
-| `BlockParse` | `BlockParse.cs` | Response parsing (LR, JSON, CSS, Regex) |
-| `BlockKeycheck` | `BlockKeycheck.cs` | Status determination via keychain pattern matching |
-| `BlockFunction` | `BlockFunction.cs` | String manipulation, crypto, encoding, GUID generation |
-| `BlockCookieContainer` | `BlockCookieContainer.cs` | Cookie file loading (Netscape/JSON/SQLite formats) |
-| `BlockBinaryCodec` | `BlockBinaryCodec.cs` | Binary data encoding/decoding operations |
-| `BlockBypassCF` | `BlockBypassCF.cs` | Cloudflare challenge handling via Selenium |
+### KeyCheck Classification
 
-### TLS Client Impersonation (`RuriLib/Functions/Requests/TlsClient/`)
+The `KEYCHECK` block classifies each test run's response into one of:
 
-Uses a native Go library (`tls-client-windows-64.dll`) to perform HTTP requests with browser-accurate TLS fingerprints:
+| Status | Meaning |
+|--------|---------|
+| **Success** | Response matches success criteria (e.g., authenticated session active) |
+| **Failure** | Response matches failure criteria (e.g., session invalid/expired) |
+| **Custom** | Response matches a user-defined named status |
+| **Retry** | Transient error — retry the same input |
+| **Ban** | Rate-limit or IP block detected — rotate proxy, retry |
 
-- **`TlsClientNative.cs`** — P/Invoke bindings to the Go native library
-- **`TlsClientRequest.cs`** / **`TlsClientResponse.cs`** — Request/response models
-- Supports session management, cookie jars, proxy routing, and HTTP/2
-- Session lifecycle: `Request()` → process → `DestroySession()` to prevent connection pool leaks
+---
 
-### Script Engine (`RuriLib/LoliScript/`)
+## TLS Client Impersonation
 
-**LoliScript** is a domain-specific scripting language that defines config logic:
+`RuriLib/Functions/Requests/TlsClient/` wraps the [tls-client](https://github.com/bogdanfinn/tls-client) Go native library via P/Invoke. This enables:
 
-- **`LoliScript.cs`** — Main interpreter with line-by-line execution
-- **`BlockParser.cs`** — Parses script lines into Block objects
-- **`CommandParser.cs`** — Handles flow control commands (IF/ELSE, JUMP, SET)
-- Supports variable interpolation (`<varName>`), capture variables, and conditional branching
+- Browser-accurate TLS ClientHello fingerprints (Chrome, Firefox, Safari, Edge profiles)
+- HTTP/2 + ALPN negotiation matching browser behavior
+- Session lifecycle management — `Request()` → process → `DestroySession()` to prevent stale connection pool leaks
 
-### Runner Engine (`RuriLib/Runner/`)
+This is particularly useful for **testing whether your service's fingerprint-based detection** correctly identifies automated requests vs. legitimate browser sessions.
 
-The multi-threaded execution engine:
+---
 
-- **`RunnerViewModel.cs`** — Core runner with `BackgroundWorker`-based parallelism
-- **`RunnerBotViewModel.cs`** — Individual bot state management
-- Features: proxy rotation, retry/ban loop evasion, safe timeout on completion wait, non-blocking UI updates via `Dispatcher.BeginInvoke`
+## Cookie Session Testing
 
-### Data Models (`RuriLib/Models/`)
+`RuriLib/Models/Cookie.cs` + `BlockCookieContainer.cs` enable:
 
-- **`BotData.cs`** — Per-bot execution context (status, variables, cookies, proxy)
-- **`CData.cs`** — Input data line wrapper
-- **`Cookie.cs`** — Cookie model with Netscape/JSON/SQLite parsing support
-- **`CProxy.cs`** — Proxy model with status tracking
+- Loading exported browser cookies (Chromium `Cookies` SQLite DB, Netscape format, JSON array export)
+- Filtering by domain prefix for scoped session replay
+- Validating whether your service correctly rejects expired, replayed, or forged session cookies
 
-### Cookie Handling (`RuriLib/Models/Cookie.cs`)
+---
 
-Extended cookie support including:
-- Netscape/Mozilla cookie format parsing
-- JSON cookie array parsing (browser export format)
-- SQLite cookie database reading (Chromium `Cookies` DB)
-- Cookie path resolution and domain filtering
+## LoliScript Example
+
+A minimal test script that validates an API authentication endpoint:
+
+```loliscript
+[SETTINGS]
+{ "Name": "auth-session-test", "NeedsProxies": false, "SuggestedBots": 10 }
+
+[SCRIPT]
+# Load session cookie from file
+COOKIECONTAINER "example." "<COOKIEPATH>" -> SAVE "SessionCookie"
+
+# Generate request identifiers
+FUNCTION GenerateGUID -> VAR "requestId"
+
+# Test authentication endpoint
+TLSREQUEST GET "https://api.example.com/v1/me"
+  COOKIE "<SessionCookie>"
+  HEADER "Accept: application/json"
+  HEADER "x-request-id: <requestId>"
+
+# Classify response
+KEYCHECK BanOnToCheck=FALSE
+  KEYCHAIN Success OR
+    KEY "\"authenticated\":true"
+  KEYCHAIN Failure OR
+    KEY "\"error\":"
+    KEY "<RESPONSECODE>" Contains "401"
+    KEY "<RESPONSECODE>" Contains "403"
+  KEYCHAIN Retry OR
+    KEY "<RESPONSECODE>" Contains "429"
+    KEY "<RESPONSECODE>" Contains "503"
+
+# Extract and capture data from successful response
+PARSE "<SOURCE>" JSON "userId" -> CAP "UserId"
+PARSE "<SOURCE>" JSON "email" -> CAP "Email"
+```
+
+---
+
+## Runner Engine Technical Notes
+
+### Concurrency & Lifecycle
+
+- Workers are `BackgroundWorker`-based with safe abort via `CancellationToken`
+- Bot completion loop has configurable timeout: `maxWaitSeconds = Max(30, RequestTimeout × 2)`
+- On timeout, stuck workers are safely aborted to prevent indefinite hang on stale TLS sockets
+
+### WPF UI Thread Safety
+
+All UI updates use `Dispatcher.BeginInvoke(action, DispatcherPriority.Normal)` (async, non-blocking). This prevents worker thread deadlocks under high concurrency (2,000–3,000 requests/min).
+
+### TLS Session Memory Management
+
+`TlsClientNative.DestroySession(sessionId)` is called in both:
+- `finally` block after each check cycle (normal cleanup)
+- `catch` block on error/timeout (immediate cleanup of stale Go runtime connection pools)
+
+This prevents memory/connection accumulation in the Go native runtime when servers close TCP Keep-Alive connections.
 
 ---
 
 ## Building
 
 ### Prerequisites
+
 - Visual Studio 2017+ or MSBuild 15+
 - .NET Framework 4.7.1 SDK
-- NuGet package restore
+- NuGet (package restore)
 
-### Build Commands
+### Build
 
 ```bash
 # Restore NuGet packages
@@ -104,78 +195,51 @@ nuget restore OpenBullet.sln
 msbuild OpenBullet.sln /p:Configuration=Release /p:Platform="Any CPU"
 ```
 
-The Roslyn compiler (`Microsoft.Net.Compilers 2.10.0`) is included via NuGet for consistent builds.
+Roslyn compiler (`Microsoft.Net.Compilers 2.10.0`) is referenced via NuGet for consistent cross-machine builds.
 
 ### Output
-- `OpenBullet/bin/Release/OpenBulletCE.exe` — Main application
-- `RuriLib/bin/Release/RuriLib.dll` — Core engine library
-
----
-
-## Runtime Dependencies
-
-The following native libraries are required at runtime (place in the executable directory):
-
-| File | Purpose |
-|------|---------|
-| `tls-client-windows-64.dll` | TLS fingerprint impersonation (Go native) |
-| `chromedriver.exe` | Selenium WebDriver for browser automation |
-| `geckodriver.exe` | Firefox WebDriver support |
-
----
-
-## Configuration System
-
-Configs are stored as `.loli` (LoliScript) or `.anom` (legacy) files with a JSON settings header:
 
 ```
-[SETTINGS]
-{ "Name": "...", "NeedsProxies": false, ... }
-
-[SCRIPT]
-FUNCTION GenerateGUID -> VAR "sessId"
-TLSREQUEST GET "https://example.com/api/data"
-  COOKIE "<COK>"
-  HEADER "Origin: https://example.com"
-KEYCHECK BanOnToCheck=FALSE
-  KEYCHAIN Success OR
-    KEY "expected_data"
-  KEYCHAIN Failure OR
-    KEY "error"
-PARSE "<SOURCE>" JSON "email" -> CAP "Email"
+OpenBullet/bin/Release/OpenBulletCE.exe     Main WPF application
+RuriLib/bin/Release/RuriLib.dll             Core engine library
 ```
 
-### KeyCheck Logic
-- **Success** → Data marked as HIT
-- **Failure** → Data marked as FAIL
-- **Custom** → Data marked with custom status
-- **Retry** → Data retried (re-queued)
-- **Ban** → Proxy banned + data retried (governed by `BanLoopEvasion`)
+### Runtime Dependencies
+
+Place these in the same directory as `OpenBulletCE.exe`:
+
+| File | Source |
+|------|--------|
+| `tls-client-windows-64.dll` | [bogdanfinn/tls-client releases](https://github.com/bogdanfinn/tls-client) |
+| `chromedriver.exe` | [ChromeDriver downloads](https://chromedriver.chromium.org/) |
+| `geckodriver.exe` | [Mozilla geckodriver releases](https://github.com/mozilla/geckodriver) |
 
 ---
 
 ## Database
 
-Uses **LiteDB** (embedded NoSQL) for:
-- Hit/result storage
-- Proxy management
-- Wordlist metadata
-- Progress tracking
+LiteDB (embedded NoSQL) manages:
+- Test run result records (hits, failures, to-check)
+- Proxy pool state and ban tracking
+- Wordlist/input dataset metadata
+- Session progress checkpointing
 
 ---
 
-## Known Technical Details
+## Known Issues & Technical Decisions
 
-### Engine Performance Fixes
-1. **TLS Session Lifecycle**: Sessions are destroyed after each check cycle and on errors to prevent Go runtime connection pool leaks
-2. **WPF Dispatcher**: Uses `BeginInvoke` (async) instead of `Invoke` (blocking) for UI updates to prevent deadlocks under high concurrency
-3. **Safe Completion Timeout**: Bot completion wait loop has configurable timeout with forced abort for stuck workers
+### Why `ShouldTriggerEvasion` Respects `BanLoopEvasion = 0`
 
-### HTTP Compression
-`HttpCompression.cs` provides Brotli and GZip decompression for responses.
+Setting `BanLoopEvasion = 0` in Proxy Settings means "disabled" (retry without limit). A previous modification hardcoded this to 3, breaking the expected behavior. Current implementation follows the original OpenBullet contract: `return retries < evasionValue || evasionValue == 0`.
+
+### Why `Dispatcher.BeginInvoke` Not `Invoke`
+
+Under concurrent load, synchronous `Dispatcher.Invoke` from 80+ workers caused the WPF UI thread queue to fill, deadlocking all workers. `BeginInvoke` with `DispatcherPriority.Normal` queues asynchronously, allowing the UI thread to batch process updates.
 
 ---
 
 ## License
 
-This project is based on [OpenBullet](https://github.com/openbullet/openbullet) (GPLv3).
+Based on [OpenBullet](https://github.com/openbullet/openbullet) — GNU General Public License v3.0.
+
+**This software is provided for authorized testing purposes only. The maintainers accept no responsibility for misuse.**
